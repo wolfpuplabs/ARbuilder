@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistem WebAR Otomatis - MindAR & Supabase</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image.prod.js"></script>
+    <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f4f4f9; }
+        .container { max-width: 600px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="file"], input[type="text"] { width: 100%; padding: 8px; box-sizing: border-box; }
+        button { background: #3b82f6; color: white; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; width: 100%; font-size: 16px; }
+        button:disabled { background: #9ca3af; }
+        #status { margin-top: 15px; font-weight: bold; color: #2563eb; }
+        #ar-preview-container { margin-top: 20px; display: none; width: 100%; height: 400px; position: relative; border: 2px solid #ccc; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Buat Project WebAR Baru</h2>
+    
+    <div class="form-group">
+        <label>Nama Project:</label>
+        <input type="text" id="projectName" placeholder="Masukkan nama project...">
+    </div>
+
+    <div class="form-group">
+        <label>1. Pilih Gambar Marker (JPG/PNG):</label>
+        <input type="file" id="imageInput" accept="image/jpeg, image/png">
+    </div>
+
+    <div class="form-group">
+        <label>2. Pilih Model 3D (Rekomendasi .glb):</label>
+        <input type="file" id="modelInput" accept=".glb,.gltf">
+    </div>
+
+    <button id="processBtn">Proses & Simpan ke Supabase</button>
+    <div id="status"></div>
+</div>
+
+<div id="ar-preview-container"></div>
+
+<script>
+// 1. Inisialisasi Supabase menggunakan kredensial Anda
+const SUPABASE_URL = "https://ogmtrdzimqlxhzomnnzl.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9nbXRyZHppbXFseGh6b21ubnpsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA3MjI4ODgsImV4cCI6MjA5NjI5ODg4OH0.fXdfuU7iELLJC2ZJXrQMBq3YxZd2hRQc7Mi2TjZR7N8";
+const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+document.getElementById('processBtn').addEventListener('click', async () => {
+    const name = document.getElementById('projectName').value;
+    const imageFile = document.getElementById('imageInput').files[0];
+    const modelFile = document.getElementById('modelInput').files[0];
+    const statusDiv = document.getElementById('status');
+    const btn = document.getElementById('processBtn');
+
+    if (!name || !imageFile || !modelFile) {
+        alert("Mohon isi semua data (Nama, Gambar Marker, dan Model 3D)!");
+        return;
+    }
+
+    try {
+        btn.disabled = true;
+        statusDiv.innerText = "Langkah 1: Mengompilasi gambar menjadi file .mind...";
+
+        // 2. PROSES MINDAR COMPILER LANGSUNG DI BROWSER
+        const compiler = new MINDAR.IMAGE.Compiler();
+        
+        // Membaca file gambar sebagai objek gambar HTML
+        const loadImage = (file) => new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        const imgObject = await loadImage(imageFile);
+        
+        // Mengompilasi gambar (Bisa menerima array gambar, di sini kita pakai 1 gambar saja)
+        const compileData = await compiler.compileImageTargets([imgObject], (progress) => {
+            statusDiv.innerText = `Mengompilasi: ${progress.toFixed(1)}%`;
+        });
+
+        // Export hasil kompilasi menjadi Blob data mentah (.mind)
+        const buffer = compiler.exportData();
+        const mindBlob = new Blob([buffer], {type: 'application/octet-stream'});
+        const mindFile = new File([mindBlob], `${Date.now()}_marker.mind`);
+
+        statusDiv.innerText = "Langkah 2: Mengunggah file ke Supabase Storage...";
+        
+        // 3. UPLOAD FILE .MIND KE SUPABASE STORAGE
+        const uploadMind = await supabase.storage.from('ar-assets').upload(`markers/${mindFile.name}`, mindFile);
+        if (uploadMind.error) throw uploadMind.error;
+
+        // 4. UPLOAD FILE MODEL 3D KE SUPABASE STORAGE
+        const uniqueModelName = `${Date.now()}_${modelFile.name}`;
+        const uploadModel = await supabase.storage.from('ar-assets').upload(`models/${uniqueModelName}`, modelFile);
+        if (uploadModel.error) throw uploadModel.error;
+
+        // Dapatkan Public URL untuk kedua file
+        const markerUrl = supabase.storage.from('ar-assets').getPublicUrl(`markers/${mindFile.name}`).data.publicUrl;
+        const modelUrl = supabase.storage.from('ar-assets').getPublicUrl(`models/${uniqueModelName}`).data.publicUrl;
+
+        statusDiv.innerText = "Langkah 3: Menyimpan data ke Database Supabase...";
+
+        // 5. SIMPAN DATA KE TABEL AR_PROJECTS
+        const { data, error } = await supabase
+            .from('ar_projects')
+            .insert([{ name, marker_url: markerUrl, model_url: modelUrl }]);
+
+        if (error) throw error;
+
+        statusDiv.innerHTML = `<span style="color: green;">Sukses! Project disimpan.</span>`;
+        
+        // Jalankan Preview AR
+        startARPreview(markerUrl, modelUrl);
+
+    } catch (err) {
+        console.error(err);
+        statusDiv.innerHTML = `<span style="color: red;">Error: ${err.message}</span>`;
+    } finally {
+        btn.disabled = false;
+    }
+});
+
+// Fungsi opsional untuk langsung ngetes AR-nya di tempat setelah sukses upload
+function startARPreview(markerUrl, modelUrl) {
+    const container = document.getElementById('ar-preview-container');
+    container.style.display = "block";
+    container.innerHTML = `
+        <a-scene mindar-image="imageTargetSrc: ${markerUrl}; autoStart: true;" embedded vr-mode-ui="enabled: false" device-orientation-permission-ui="enabled: false">
+            <a-assets>
+                <a-asset-item id="uploadedModel" src="${modelUrl}"></a-asset-item>
+            </a-assets>
+            <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
+            <a-entity mindar-image-target="targetIndex: 0">
+                <a-gltf-model rotation="0 0 0" position="0 0 0" scale="0.5 0.5 0.5" src="#uploadedModel"></a-gltf-model>
+            </a-entity>
+        </a-scene>
+    `;
+}
+</script>
+
+</body>
+</html>
